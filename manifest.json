@@ -1,9 +1,9 @@
 {
   "id": "folder-note-links",
   "name": "Folder Note Links",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.4.0",
-  "description": "Resolve a wikilink pointing at a folder to that folder's index note (index, Index, README, …), show it in the graph, and create it inside the folder when followed. Dynamic — no aliases or titles to keep in sync.",
+  "description": "Resolve a wikilink pointing at a folder to that folder's index note (index, Index, README, …), show it in the graph, offer folders in link autocomplete, and create the note inside the folder when followed. Dynamic — no aliases or titles to keep in sync.",
   "author": "Kiran Jonnalagadda",
   "authorUrl": "https://github.com/jace",
   "isDesktopOnly": false

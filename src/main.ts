@@ -37,6 +37,7 @@ function withExtension(name: string): string {
 export default class FolderNoteLinksPlugin extends Plugin {
   settings: FolderNoteLinksSettings = DEFAULT_SETTINGS;
   private folderIndexCache: Map<string, TFolder[]> | null = null;
+  private allFoldersCache: TFolder[] | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -66,7 +67,10 @@ export default class FolderNoteLinksPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("resolve", (file) => this.reflectFolderLinks(file.path)),
     );
-    const invalidate = () => (this.folderIndexCache = null);
+    const invalidate = () => {
+      this.folderIndexCache = null;
+      this.allFoldersCache = null;
+    };
     this.registerEvent(this.app.vault.on("create", invalidate));
     this.registerEvent(this.app.vault.on("delete", invalidate));
     this.registerEvent(this.app.vault.on("rename", invalidate));
@@ -75,6 +79,11 @@ export default class FolderNoteLinksPlugin extends Plugin {
       const paths = new Set([...Object.keys(mc.resolvedLinks), ...Object.keys(mc.unresolvedLinks)]);
       for (const path of paths) this.reflectFolderLinks(path);
       (mc as any).trigger("resolved");
+
+      // 4. Autocomplete: offer folders (that have an index note) as link targets
+      // and drop the index notes themselves, so editors link to the folder — not
+      // to `README`. Patches the built-in link suggester (internal API).
+      this.patchLinkSuggest();
     });
 
     // 3. Following a link to an index-less folder makes the note *inside* the
@@ -196,6 +205,105 @@ export default class FolderNoteLinksPlugin extends Plugin {
     walk(this.app.vault.getRoot());
     this.folderIndexCache = index;
     return index;
+  }
+
+  // All folders (cached, invalidated with the folder index). Every folder is a
+  // valid link target: with an index note it resolves to it; without one it's an
+  // unresolved link that create-on-follow fills in — and that Quartz renders as a
+  // folder listing until then.
+  private allFolders(): TFolder[] {
+    if (this.allFoldersCache) return this.allFoldersCache;
+    const result: TFolder[] = [];
+    const walk = (folder: TFolder) => {
+      for (const child of folder.children) {
+        if (child instanceof TFolder) {
+          result.push(child);
+          walk(child);
+        }
+      }
+    };
+    walk(this.app.vault.getRoot());
+    this.allFoldersCache = result;
+    return result;
+  }
+
+  // The text to insert for a folder link: bare name if unique, else full path
+  // (no brackets — they're already in the editor around the query).
+  private folderLinktext(folder: TFolder): string {
+    const sameName = this.getFolderIndex().get(folder.name) ?? [];
+    return sameName.length <= 1 ? folder.name : folder.path;
+  }
+
+  // Rework the built-in link suggestions: drop the index notes and prepend the
+  // folders that contain them, matched against the typed query.
+  private augmentLinkSuggestions(items: unknown[], context: { query?: string }): unknown[] {
+    const indexNames = new Set(this.settings.candidateNames.map(withExtension));
+    const filtered = items.filter((s: any) => !(s?.file instanceof TFile && indexNames.has(s.file.name)));
+    const query = String(context?.query ?? "")
+      .toLowerCase()
+      .replace(/\/+$/, "");
+    if (!query) return filtered;
+    const folders = this.allFolders()
+      .filter((f) => f.name.toLowerCase().includes(query) || f.path.toLowerCase().includes(query))
+      .sort((a, b) => a.path.length - b.path.length)
+      .slice(0, 8)
+      .map((f) => ({ __folderNoteLink: f }));
+    return [...folders, ...filtered];
+  }
+
+  // Patch the built-in link suggester (suggests[0]) to add folder targets and
+  // hide index notes. Internal API — guarded, and a no-op if the shape changes.
+  private patchLinkSuggest(): void {
+    const suggests = (this.app.workspace as any).editorSuggest?.suggests;
+    const link = Array.isArray(suggests) ? suggests[0] : undefined;
+    if (!link || typeof link.getSuggestions !== "function" || typeof link.selectSuggestion !== "function") {
+      return;
+    }
+    const self = this;
+    this.register(
+      around(link, {
+        getSuggestions(original: (ctx: any) => unknown) {
+          return function (this: unknown, context: any) {
+            const out = original.call(this, context);
+            const process = (items: unknown[]) => self.augmentLinkSuggestions(items ?? [], context);
+            return out instanceof Promise ? out.then(process) : process(out as unknown[]);
+          };
+        },
+        renderSuggestion(original: (v: any, el: HTMLElement) => void) {
+          return function (this: unknown, value: any, el: HTMLElement) {
+            const folder: TFolder | undefined = value?.__folderNoteLink;
+            if (folder) {
+              el.addClass("mod-complex");
+              const content = el.createDiv({ cls: "suggestion-content" });
+              content.createDiv({ cls: "suggestion-title", text: folder.name });
+              content.createDiv({ cls: "suggestion-note", text: folder.path });
+              el.createDiv({ cls: "suggestion-aux" }).createSpan({
+                cls: "suggestion-flair",
+                text: "folder",
+              });
+              return;
+            }
+            return original.call(this, value, el);
+          };
+        },
+        selectSuggestion(original: (v: any, evt: any) => void) {
+          return function (this: any, value: any, evt: any) {
+            const folder: TFolder | undefined = value?.__folderNoteLink;
+            if (folder) {
+              const ctx = this.context;
+              if (ctx?.editor && ctx.start && ctx.end) {
+                const target = self.folderLinktext(folder);
+                ctx.editor.replaceRange(target, ctx.start, ctx.end);
+                ctx.editor.setCursor({ line: ctx.start.line, ch: ctx.start.ch + target.length });
+              }
+              if (typeof this.close === "function") this.close();
+              return;
+            }
+            return original.call(this, value, evt);
+          };
+        },
+      }),
+    );
   }
 
   async loadSettings() {
