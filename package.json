@@ -1,0 +1,31 @@
+{
+  "name": "obsidian-folder-note-links",
+  "version": "0.1.0",
+  "description": "Obsidian plugin: resolve wikilinks pointing at a folder to that folder's folder note, dynamically.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "folder-note",
+    "wikilink",
+    "link-resolution"
+  ],
+  "author": "Kiran Jonnalagadda",
+  "license": "MIT",
+  "dependencies": {
+    "monkey-around": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "tslib": "^2.8.0",
+    "typescript": "^5.6.0"
+  }
+}
