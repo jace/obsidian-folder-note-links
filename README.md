@@ -19,7 +19,7 @@ The wrap is installed with [`monkey-around`](https://github.com/pjeby/monkey-aro
 
 ## Scope
 
-v1 covers **clicking** and **hover preview**, and stops the phantom-file-on-click. Graph edges and the backlinks panel read a separately-computed link cache and aren't affected yet.
+Covers **clicking**, **hover preview**, and stops the phantom-file-on-click via the resolver wrap. Folder links are also reflected into `metadataCache.resolvedLinks`, so the **graph** and **backlinks panel** show them as real edges.
 
 ## License
 

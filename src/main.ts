@@ -47,6 +47,35 @@ export default class FolderNoteLinksPlugin extends Plugin {
         },
       }),
     );
+
+    // The graph and backlinks read metadataCache.resolvedLinks, which is computed
+    // independently of the resolver above — folder links land in unresolvedLinks.
+    // Reflect them into resolvedLinks after each file resolves (Obsidian recomputes
+    // from scratch, so re-apply every time), and once in bulk on startup.
+    this.registerEvent(
+      this.app.metadataCache.on("resolve", (file) => this.reflectFolderLinks(file.path)),
+    );
+    this.app.workspace.onLayoutReady(() => {
+      const mc = this.app.metadataCache;
+      const paths = new Set([...Object.keys(mc.resolvedLinks), ...Object.keys(mc.unresolvedLinks)]);
+      for (const path of paths) this.reflectFolderLinks(path);
+      (mc as any).trigger("resolved"); // prompt the graph/backlinks to re-read
+    });
+  }
+
+  // Move any unresolved links from `sourcePath` that point at a folder note into
+  // resolvedLinks, so the graph and backlinks show them as real edges.
+  private reflectFolderLinks(sourcePath: string): void {
+    const mc = this.app.metadataCache;
+    const unresolved = mc.unresolvedLinks[sourcePath];
+    if (!unresolved) return;
+    for (const linktext of Object.keys(unresolved)) {
+      const dest = this.resolveFolderNote(linktext, sourcePath);
+      if (!dest || dest.path === sourcePath) continue;
+      const resolved = (mc.resolvedLinks[sourcePath] ??= {});
+      resolved[dest.path] = (resolved[dest.path] ?? 0) + unresolved[linktext];
+      delete unresolved[linktext];
+    }
   }
 
   // Resolve a folder-pointing linkpath (e.g. "Docs/Infra", "Docs/Infra/", "Infra")
