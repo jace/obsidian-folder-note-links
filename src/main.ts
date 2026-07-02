@@ -7,67 +7,134 @@ import {
   TFile,
   TFolder,
   normalizePath,
+  parseLinktext,
 } from "obsidian";
 
 interface FolderNoteLinksSettings {
-  // Index-note basenames to try, in order, inside a linked folder. `{{folder_name}}`
-  // expands to the folder's own name. First one that exists wins.
+  // Index-note names to try inside a linked folder, in priority order. Names are
+  // case-sensitive (Obsidian is). A name with no extension implies `.md`; add an
+  // extension (e.g. "Index.base") to target another file type. First match wins.
   candidateNames: string[];
-  // When the "Folder notes" plugin is installed, also recognize its configured note name.
-  deferToFolderNotes: boolean;
+  // Create a folder note when you follow a link to a folder that has none.
+  createOnFollow: boolean;
+  // Name to create for that note (extension optional, `.md` implied). May differ
+  // from the lookup order above — e.g. look up `index` first but create `README`.
+  createName: string;
 }
 
 const DEFAULT_SETTINGS: FolderNoteLinksSettings = {
-  // `index` first to match Quartz's folder-index convention, then README, then a
-  // note named after the folder. First existing candidate wins.
-  candidateNames: ["index", "README", "{{folder_name}}"],
-  deferToFolderNotes: true,
+  candidateNames: ["index", "Index", "README"],
+  createOnFollow: true,
+  createName: "index",
 };
+
+// A bare name implies a Markdown target, matching Obsidian's wikilink resolution;
+// an explicit extension is kept as-is.
+function withExtension(name: string): string {
+  return /\.[^./\\]+$/.test(name) ? name : `${name}.md`;
+}
 
 export default class FolderNoteLinksPlugin extends Plugin {
   settings: FolderNoteLinksSettings = DEFAULT_SETTINGS;
+  private folderIndexCache: Map<string, TFolder[]> | null = null;
 
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new FolderNoteLinksSettingTab(this.app, this));
 
-    // Wrap Obsidian's single link-resolution entry point. When a wikilink
-    // resolves to nothing (no note of that name), and it actually points at a
-    // folder, resolve it to that folder's folder note instead. `around` from
-    // monkey-around restores cleanly on unload even if other plugins also wrap.
     const self = this;
+
+    // 1. Resolve a wikilink that points at a folder to that folder's index note.
+    // Wrap Obsidian's one link-resolution entry point; only step in on a miss, so
+    // a real note always wins. monkey-around restores cleanly on unload.
     this.register(
       around(this.app.metadataCache as any, {
         getFirstLinkpathDest(original: (lp: string, sp: string) => TFile | null) {
           return function (this: unknown, linkpath: string, sourcePath: string): TFile | null {
             const dest = original.call(this, linkpath, sourcePath);
-            if (dest) return dest; // a real note matched — never override it
+            if (dest) return dest;
             return self.resolveFolderNote(linkpath, sourcePath);
           };
         },
       }),
     );
 
-    // The graph and backlinks read metadataCache.resolvedLinks, which is computed
-    // independently of the resolver above — folder links land in unresolvedLinks.
-    // Reflect them into resolvedLinks after each file resolves (Obsidian recomputes
-    // from scratch, so re-apply every time), and once in bulk on startup.
+    // 2. The graph and backlinks read metadataCache.resolvedLinks, computed
+    // independently of the resolver — folder links land in unresolvedLinks. Move
+    // them across after each file resolves (Obsidian recomputes from scratch, so
+    // re-apply each time) plus a bulk pass on startup.
     this.registerEvent(
       this.app.metadataCache.on("resolve", (file) => this.reflectFolderLinks(file.path)),
     );
-
-    // Invalidate the cached folder index when the folder tree changes.
     const invalidate = () => (this.folderIndexCache = null);
     this.registerEvent(this.app.vault.on("create", invalidate));
     this.registerEvent(this.app.vault.on("delete", invalidate));
     this.registerEvent(this.app.vault.on("rename", invalidate));
-
     this.app.workspace.onLayoutReady(() => {
       const mc = this.app.metadataCache;
       const paths = new Set([...Object.keys(mc.resolvedLinks), ...Object.keys(mc.unresolvedLinks)]);
       for (const path of paths) this.reflectFolderLinks(path);
-      (mc as any).trigger("resolved"); // prompt the graph/backlinks to re-read
+      (mc as any).trigger("resolved");
     });
+
+    // 3. Following a link to an index-less folder makes the note *inside* the
+    // folder rather than a sibling file of the same name (Obsidian would create a
+    // file for any unresolved link anyway — this just puts it where it belongs).
+    this.register(
+      around(this.app.workspace as any, {
+        openLinkText(original: (...a: any[]) => Promise<void>) {
+          return async function (
+            this: unknown,
+            linktext: string,
+            sourcePath: string,
+            newLeaf?: unknown,
+            openViewState?: unknown,
+          ): Promise<void> {
+            const { path: linkpath } = parseLinktext(linktext);
+            if (!self.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath)) {
+              const created = await self.createFolderNote(linkpath, sourcePath);
+              if (created) {
+                await self.app.workspace.getLeaf(newLeaf as any).openFile(created, openViewState as any);
+                return;
+              }
+            }
+            return original.call(this, linktext, sourcePath, newLeaf, openViewState);
+          };
+        },
+      }),
+    );
+  }
+
+  // Resolve a folder-pointing linkpath ("Docs/Infra", "Docs/Infra/", "Infra") to
+  // the first existing candidate index note inside that folder.
+  resolveFolderNote(linkpath: string, sourcePath: string): TFile | null {
+    const folder = this.linkedFolder(linkpath, sourcePath);
+    if (!folder) return null;
+    for (const rawName of this.settings.candidateNames) {
+      const rel = withExtension(rawName);
+      const path = normalizePath(folder.path ? `${folder.path}/${rel}` : rel);
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) return file;
+    }
+    return null;
+  }
+
+  // Create the configured index note inside a linked folder that has none, and
+  // return it. Returns null if the link isn't a folder or creation is off.
+  private async createFolderNote(linkpath: string, sourcePath: string): Promise<TFile | null> {
+    if (!this.settings.createOnFollow) return null;
+    const folder = this.linkedFolder(linkpath, sourcePath);
+    if (!folder) return null;
+    const rel = withExtension(this.settings.createName);
+    const path = normalizePath(folder.path ? `${folder.path}/${rel}` : rel);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) return existing;
+    if (existing) return null; // a folder sits at that path — don't clobber
+    try {
+      return await this.app.vault.create(path, "");
+    } catch {
+      return null;
+    }
   }
 
   // Move any unresolved links from `sourcePath` that point at a folder note into
@@ -85,58 +152,34 @@ export default class FolderNoteLinksPlugin extends Plugin {
     }
   }
 
-  // Resolve a folder-pointing linkpath (e.g. "Docs/Infra", "Docs/Infra/", "Infra")
-  // to the first existing candidate index note inside that folder.
-  resolveFolderNote(linkpath: string, sourcePath: string): TFile | null {
+  // The TFolder a linkpath points at: strip #subpath and a trailing slash, then
+  // match an exact path (relative to the source, then vault root), else the
+  // shortest-path folder whose name matches (via the cached index).
+  private linkedFolder(linkpath: string, sourcePath: string): TFolder | null {
     if (!linkpath) return null;
-    // Drop any #heading / #^block subpath, then a trailing slash.
     const clean = linkpath.split("#")[0].replace(/\/+$/, "").trim();
     if (!clean) return null;
-
-    const folder = this.findFolder(clean, sourcePath);
-    if (!folder) return null;
-
-    for (const rawName of this.candidateNames()) {
-      const name = rawName.replace(/\{\{\s*folder_name\s*\}\}/g, folder.name);
-      const path = folder.path ? `${folder.path}/${name}.md` : `${name}.md`;
-      const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
-      if (file instanceof TFile) return file;
-    }
-    return null;
-  }
-
-  // Find the TFolder a linkpath refers to: exact path (relative to the source
-  // file, then vault root), else the shortest-path folder whose name matches.
-  private findFolder(linkpath: string, sourcePath: string): TFolder | null {
-    const vault = this.app.vault;
 
     const sourceFolder = sourcePath.includes("/")
       ? sourcePath.slice(0, sourcePath.lastIndexOf("/"))
       : "";
-    const exactPaths = [sourceFolder ? `${sourceFolder}/${linkpath}` : "", linkpath].filter(Boolean);
+    const exactPaths = [sourceFolder ? `${sourceFolder}/${clean}` : "", clean].filter(Boolean);
     for (const p of exactPaths) {
-      const af = vault.getAbstractFileByPath(normalizePath(p));
+      const af = this.app.vault.getAbstractFileByPath(normalizePath(p));
       if (af instanceof TFolder) return af;
     }
 
-    // Basename fallback (like Obsidian's shortest-path note resolution), via a
-    // cached name→folders index so this stays O(1) rather than walking the whole
-    // tree for every unresolved link on startup — including dangling links that
-    // never match a folder. If the linkpath has slashes, also require the folder's
-    // path to end with it.
-    const base = linkpath.split("/").pop() as string;
+    const base = clean.split("/").pop() as string;
     let best: TFolder | null = null;
     for (const folder of this.getFolderIndex().get(base) ?? []) {
-      const pathMatches = !linkpath.includes("/") || folder.path.endsWith(linkpath);
+      const pathMatches = !clean.includes("/") || folder.path.endsWith(clean);
       if (pathMatches && (!best || folder.path.length < best.path.length)) best = folder;
     }
     return best;
   }
 
-  // Lazily-built { folder name → folders } index, invalidated when the folder
-  // tree changes (see onload). Turns the basename fallback into a map lookup.
-  private folderIndexCache: Map<string, TFolder[]> | null = null;
-
+  // Lazily-built { folder name → folders } index, invalidated on folder changes,
+  // so the basename fallback is a map lookup instead of a full-tree walk.
   private getFolderIndex(): Map<string, TFolder[]> {
     if (this.folderIndexCache) return this.folderIndexCache;
     const index = new Map<string, TFolder[]>();
@@ -153,21 +196,6 @@ export default class FolderNoteLinksPlugin extends Plugin {
     walk(this.app.vault.getRoot());
     this.folderIndexCache = index;
     return index;
-  }
-
-  // The configured candidate names, plus the Folder Notes plugin's own name if it
-  // isn't already covered — appended so it's recognized without overriding the
-  // priority order above.
-  private candidateNames(): string[] {
-    const names = [...this.settings.candidateNames];
-    if (this.settings.deferToFolderNotes) {
-      const configured = (this.app as any).plugins?.plugins?.["folder-notes"]?.settings
-        ?.folderNoteName;
-      if (typeof configured === "string" && configured.trim() && !names.includes(configured)) {
-        names.push(configured);
-      }
-    }
-    return names;
   }
 
   async loadSettings() {
@@ -194,33 +222,45 @@ class FolderNoteLinksSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Folder note names")
       .setDesc(
-        "Index-note basenames to look for inside a linked folder, one per line, in priority order. " +
-          "Use {{folder_name}} for a note named after the folder. First match wins.",
+        "Names to look for inside a linked folder, one per line, in priority order. " +
+          "Case-sensitive. A bare name means Markdown (.md); add an extension " +
+          "(e.g. Index.base) to target another type. First match wins.",
       )
       .addTextArea((text) => {
         text.inputEl.rows = 4;
-        text
-          .setValue(this.plugin.settings.candidateNames.join("\n"))
-          .onChange(async (value) => {
-            this.plugin.settings.candidateNames = value
-              .split("\n")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            await this.plugin.saveSettings();
-          });
+        text.setValue(this.plugin.settings.candidateNames.join("\n")).onChange(async (value) => {
+          this.plugin.settings.candidateNames = value
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          await this.plugin.saveSettings();
+        });
       });
 
     new Setting(containerEl)
-      .setName("Recognize the Folder Notes plugin's name")
+      .setName("Create on follow")
       .setDesc(
-        "When the Folder Notes plugin is installed, also try its configured folder-note name " +
-          "(added to the list above if not already there), so a custom name stays in sync.",
+        "When you follow a link to a folder that has no index note, create one inside " +
+          "the folder (instead of a sibling file with the same name).",
       )
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.deferToFolderNotes).onChange(async (value) => {
-          this.plugin.settings.deferToFolderNotes = value;
+        toggle.setValue(this.plugin.settings.createOnFollow).onChange(async (value) => {
+          this.plugin.settings.createOnFollow = value;
           await this.plugin.saveSettings();
         }),
+      );
+
+    new Setting(containerEl)
+      .setName("Name to create")
+      .setDesc("Note name to create for the above (extension optional, .md implied).")
+      .addText((text) =>
+        text
+          .setPlaceholder("index")
+          .setValue(this.plugin.settings.createName)
+          .onChange(async (value) => {
+            this.plugin.settings.createName = value.trim() || DEFAULT_SETTINGS.createName;
+            await this.plugin.saveSettings();
+          }),
       );
   }
 }

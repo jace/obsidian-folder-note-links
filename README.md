@@ -1,25 +1,24 @@
 # Folder Note Links
 
-An [Obsidian](https://obsidian.md) plugin that makes a wikilink pointing at a **folder** open that folder's **folder note** — the `index` / `README` / same-named note inside it.
+An [Obsidian](https://obsidian.md) plugin that makes a wikilink pointing at a **folder** resolve to that folder's **index note** — the `index` / `Index` / `README` note inside it.
 
-Obsidian resolves `[[Something]]` to a *note* named "Something" (or one of its aliases). If your folder notes are named `README.md` or `index.md` (common when the vault also feeds a static site like Quartz or Hugo), a link to the folder matches no note, so clicking it creates a stray new file. The usual workarounds — an alias or a `title:` equal to the folder name — store the folder's name a second time, and drift the moment you rename the folder.
+Obsidian resolves `[[Something]]` to a *note* named "Something" (or an alias). If your folder notes are named `index.md` or `README.md` (common when the vault also feeds a static site like Quartz or Hugo), a link to the folder matches no note, so clicking it creates a stray sibling file — a file and a folder with the same name, which is always confusing. The usual workarounds — an alias or a `title:` equal to the folder name — store the folder's name a second time and drift the moment you rename the folder.
 
-This plugin resolves the link **dynamically at lookup time** from the live folder tree, so there's nothing to keep in sync.
+This plugin resolves the link **dynamically from the live folder tree**, so there's nothing to keep in sync. It's small and opinion-free: **no UI changes, nothing hidden, no title/alias machinery.**
 
-## How it works
+## What it does
 
-It wraps Obsidian's link resolver (`MetadataCache.getFirstLinkpathDest`). When a link resolves to a real note, nothing changes. When it resolves to nothing but points at a folder, the plugin returns the first existing **candidate index note** in that folder. It normalizes a trailing slash, so `[[Docs/Infra]]`, `[[Docs/Infra/]]` and `[[Infra]]` all work.
+1. **Resolve** — a link to a folder resolves to the first existing index note in it, trying your candidate names in order (default `index`, `Index`, `README` — Obsidian is case-sensitive). Trailing slash is fine: `[[Docs/Infra]]`, `[[Docs/Infra/]]`, and `[[Infra]]` all work. A bare name means Markdown (`.md`); add an extension (e.g. `Index.base`) to target another file type.
+2. **Graph & backlinks** — the resolved folder links are reflected into `metadataCache.resolvedLinks`, so they show as real edges in the graph and in the backlinks panel.
+3. **Create on follow** — following a link to a folder that has no index note creates one *inside* the folder (not a sibling file with the folder's name). Obsidian would create a file for any unresolved link anyway; this just puts it where it belongs. The name to create is configurable and may differ from the lookup order — e.g. look up `index` first but create `README`.
 
-The wrap is installed with [`monkey-around`](https://github.com/pjeby/monkey-around) and removed on unload.
+The resolver wraps `MetadataCache.getFirstLinkpathDest` (and `Workspace.openLinkText` for creation) with [`monkey-around`](https://github.com/pjeby/monkey-around), removed on unload.
 
-## Configuration
+## Settings
 
-- **Folder note names** — the index-note basenames to try, in priority order (default `index`, `README`, `{{folder_name}}`). `{{folder_name}}` expands to the folder's own name. First existing file wins.
-- **Recognize the Folder Notes plugin's name** — when the [Folder Notes](https://github.com/LostPaul/obsidian-folder-notes) plugin is installed, also try its configured folder-note name (added to the list if it's a custom one), so the two stay in sync.
-
-## Scope
-
-Covers **clicking**, **hover preview**, and stops the phantom-file-on-click via the resolver wrap. Folder links are also reflected into `metadataCache.resolvedLinks`, so the **graph** and **backlinks panel** show them as real edges.
+- **Folder note names** — candidate names to look for, in priority order (case-sensitive; `.md` implied).
+- **Create on follow** — create an index note inside an index-less folder when followed.
+- **Name to create** — the note name to create (extension optional).
 
 ## License
 
