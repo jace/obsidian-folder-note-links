@@ -55,6 +55,13 @@ export default class FolderNoteLinksPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("resolve", (file) => this.reflectFolderLinks(file.path)),
     );
+
+    // Invalidate the cached folder index when the folder tree changes.
+    const invalidate = () => (this.folderIndexCache = null);
+    this.registerEvent(this.app.vault.on("create", invalidate));
+    this.registerEvent(this.app.vault.on("delete", invalidate));
+    this.registerEvent(this.app.vault.on("rename", invalidate));
+
     this.app.workspace.onLayoutReady(() => {
       const mc = this.app.metadataCache;
       const paths = new Set([...Object.keys(mc.resolvedLinks), ...Object.keys(mc.unresolvedLinks)]);
@@ -112,23 +119,40 @@ export default class FolderNoteLinksPlugin extends Plugin {
       if (af instanceof TFolder) return af;
     }
 
-    // Basename fallback (like Obsidian's shortest-path note resolution). If the
-    // linkpath contains slashes, also require the folder's path to end with it.
+    // Basename fallback (like Obsidian's shortest-path note resolution), via a
+    // cached name→folders index so this stays O(1) rather than walking the whole
+    // tree for every unresolved link on startup — including dangling links that
+    // never match a folder. If the linkpath has slashes, also require the folder's
+    // path to end with it.
     const base = linkpath.split("/").pop() as string;
     let best: TFolder | null = null;
+    for (const folder of this.getFolderIndex().get(base) ?? []) {
+      const pathMatches = !linkpath.includes("/") || folder.path.endsWith(linkpath);
+      if (pathMatches && (!best || folder.path.length < best.path.length)) best = folder;
+    }
+    return best;
+  }
+
+  // Lazily-built { folder name → folders } index, invalidated when the folder
+  // tree changes (see onload). Turns the basename fallback into a map lookup.
+  private folderIndexCache: Map<string, TFolder[]> | null = null;
+
+  private getFolderIndex(): Map<string, TFolder[]> {
+    if (this.folderIndexCache) return this.folderIndexCache;
+    const index = new Map<string, TFolder[]>();
     const walk = (folder: TFolder) => {
       for (const child of folder.children) {
         if (child instanceof TFolder) {
-          const pathMatches = !linkpath.includes("/") || child.path.endsWith(linkpath);
-          if (child.name === base && pathMatches) {
-            if (!best || child.path.length < best.path.length) best = child;
-          }
+          const arr = index.get(child.name);
+          if (arr) arr.push(child);
+          else index.set(child.name, [child]);
           walk(child);
         }
       }
     };
-    walk(vault.getRoot());
-    return best;
+    walk(this.app.vault.getRoot());
+    this.folderIndexCache = index;
+    return index;
   }
 
   // The configured candidate names, plus the Folder Notes plugin's own name if it

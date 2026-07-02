@@ -1,7 +1,7 @@
 {
   "id": "folder-note-links",
   "name": "Folder Note Links",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.4.0",
   "description": "Resolve wikilinks that point at a folder to that folder's folder note (index, README, {{folder_name}}, …), dynamically — no aliases or titles to keep in sync.",
   "author": "Kiran Jonnalagadda",

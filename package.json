@@ -1,6 +1,6 @@
 {
   "name": "obsidian-folder-note-links",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Obsidian plugin: resolve wikilinks pointing at a folder to that folder's folder note, dynamically.",
   "main": "main.js",
   "scripts": {
